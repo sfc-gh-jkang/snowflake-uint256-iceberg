@@ -1,0 +1,32 @@
+# Secrets & credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p8
+credentials.json
+connections.toml
+**/secrets/
+**/*secret*
+**/*credential*
+**/*password*
+.streamlit/secrets.toml
+
+# Terraform
+.terraform/
+**/.terraform/
+*.tfstate
+*.tfstate.backup
+.terraform.lock.hcl
+*.tfvars
+!*.tfvars.example
+
+# Local
+.DS_Store
+__pycache__/
+*.pyc
+.venv/
+
+# Rendered SQL contains your real object names
+rendered/
