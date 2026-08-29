@@ -28,7 +28,8 @@ CREATE OR REPLACE ICEBERG TABLE <DB>.<SCHEMA>.APPROVALS_RAW (
 )
 CATALOG = 'SNOWFLAKE'
 EXTERNAL_VOLUME = '<EXTERNAL_VOLUME>'
-BASE_LOCATION = 'eth_u256_approvals_raw';
+BASE_LOCATION = 'eth_u256_approvals_raw'
+ICEBERG_VERSION = 3;   -- v3 required for consumer-side streams / dynamic tables on the share
 
 -- Synthetic ERC-20 Approval events. 5% are "infinite approvals" (2^256-1), which is
 -- the standard unlimited-allowance idiom and the reason fixed(32) is load-bearing.

@@ -173,11 +173,17 @@ rewriting the vectorized version properly changed nothing. There is no numpy dty
 integers, so it is a Python-object loop either way and the batching is pure overhead. Use the
 UDAF for aggregation instead.
 
-**Consider Iceberg v3.** Per
+**Create the shared tables as Iceberg v3.** Per
 [auto-fulfillment with open table formats](https://docs.snowflake.com/en/collaboration/use-auto-fulfillment-with-open-table-formats),
-streams and dynamic tables on shared Iceberg **v2** tables are not supported, while **v3** is. If
-consumers will build their own dynamic tables on the share, create these as v3. The tables in
-this test were v2, so the consumer-side dynamic-table path is **untested here**.
+streams and dynamic tables on shared Iceberg **v2** tables are not supported, while **v3** is. Both
+tables here are created with `ICEBERG_VERSION = 3` for that reason.
+
+Verified end to end on the cross-region pair: after the v3 rebuild the consumer saw both tables at
+`iceberg_table_format_version = 3` with all 200,000 rows, then successfully created **a stream** and
+**a dynamic table** directly on the shared Iceberg table. The dynamic table returned exactly 10,000
+rows, matching the infinite-approval count, so it produced correct results rather than merely being
+created. Note there is no in-place v2 → v3 upgrade — including cloning a v2 table and upgrading the
+clone — so this has to be set when the table is first created.
 
 ## Running it
 

@@ -4,7 +4,7 @@ Every number here was produced by executing the scripts in `sql/`. Nothing is es
 
 **Environment.** Provider: a Snowflake demo account in `AWS_US_EAST_1`, Business Critical.
 Consumer: a separate account in `AWS_US_WEST_2` — different region, real full account, not a
-reader account. Warehouse: X-Small class. Iceberg format version 2, Snowflake-managed storage on
+reader account. Warehouse: X-Small class. Iceberg format version 3, Snowflake-managed storage on
 an external volume. Measured 2026-08-28.
 
 **Caveat on the benchmarks.** Single account pair, single warehouse size, synthetic data. Useful
@@ -135,7 +135,21 @@ out-of-range set is precisely the unlimited-allowance set, nothing else.
 | `token_addr` | `fixed(20)` | `BINARY(20)` |
 
 Both tables arrived with `is_iceberg = Y`, 200,000 rows each; the derived table also
-`is_dynamic = Y`. `SHOW ICEBERG TABLES` reported both as `MANAGED`, format version 2.
+`is_dynamic = Y`. `SHOW ICEBERG TABLES` reported both as `MANAGED`, format version 3.
+
+**Consumer-side streams and dynamic tables on the share.** Because both shared tables are
+`ICEBERG_VERSION = 3`, the consumer can build its own pipeline objects directly on the shared
+Iceberg table — not supported on v2. Verified on the consumer account:
+
+| Object created by the consumer | On | Result |
+|---|---|---|
+| `STREAM ... ON TABLE ETH_U256_CONSUMED.ETH_SHARE.APPROVALS_RAW` | shared v3 Iceberg table | created |
+| `DYNAMIC TABLE` selecting from the same shared table | shared v3 Iceberg table | created, returned **exactly 10,000 rows** |
+
+The dynamic table filtered `value_raw >= 0xFF..FF` and returned 10,000 rows, matching the
+infinite-approval count in the source data — so it computed the right answer, not merely created
+successfully. Note `ON ICEBERG TABLE` is not valid stream syntax; it is `ON TABLE` regardless of
+the source table's type.
 
 **Fulfillment sequence.** `SYSTEM$TRIGGER_LISTING_REFRESH` → `in 0 region(s)`;
 `is_ready_for_import: false`; `CREATE DATABASE … FROM LISTING` →

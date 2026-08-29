@@ -77,8 +77,8 @@ Stated plainly, because these are the honest gaps:
   `SYSTEM$VERIFY_EXTERNAL_VOLUME` reports success without it while `CREATE ICEBERG TABLE` hangs
   on `Query needs to be retried to setup external volume`. Grant `roles/storage.admin` or a
   custom role carrying `storage.buckets.get`.
-- **Iceberg v3.** All runs were format version 2, so consumer-side streams and dynamic tables on
-  the shared table remain untested.
+- **Iceberg v3 on Azure and GCP.** The v3 rebuild and the consumer-side stream and dynamic table
+  were exercised on the AWS pair only. Azure and GCP ran v3 DDL but no share.
 - **A reader account as consumer.** Reader accounts cannot run DML and are not supported with
   organizational listings; whether they can create a UDF is unverified.
 - **Scale.** 200,000 rows on all three clouds. The 5,000,000-row performance figures in
