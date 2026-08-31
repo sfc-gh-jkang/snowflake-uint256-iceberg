@@ -91,12 +91,16 @@ Stated plainly, because these are the honest gaps:
   `DECIMAL(38, 0)` and real `metadata.json` exists on the external volume, so Spark or Trino
   *should* read them as ordinary decimals. No external engine has actually been pointed at them.
   This is the weakest open-format claim in the repo.
+- **Chunk-sum overflow at ~10^18 rows.** Derived arithmetically (chunk < 10^20, decimal(38,0)
+  < 10^38); not reachable on any test dataset, so it is reasoning rather than a measurement.
 - **`AVG`, `MEDIAN` and percentiles over the full 256-bit range.** Not implemented and not
   measured — see RESULTS.md section 16. Only `SUM` has an exact full-range answer here.
 - **`DECFLOAT` determinism.** Four repeated sums agreed, which is not enough to claim
   determinism for an order-sensitive decimal-float aggregate.
-- **An incremental refresh of the chunked dynamic table.** Only the initial build was
-  exercised; no rows were appended and no refresh observed picking them up.
+- **An incremental refresh of the chunked dynamic table.** ATTEMPTED and INCOMPLETE. Rows were
+  appended to `APPROVALS_RAW` and a refresh of both dynamic tables was issued, but the provider
+  connection became unreachable mid-test, so neither the row counts nor the chunk values were
+  ever verified. Treat this as untested, and see the note below about residual state.
 - **A consumer-side stream or dynamic table on `APPROVALS_CHUNKED`.** Proven on
   `APPROVALS_RAW`, not re-proven on the chunked table.
 - **Teardown with the chunked table present in the share.** `99_teardown.sql` drops the schema

@@ -374,3 +374,48 @@ determinism guarantee.
 digits, restrict `AVG` to rows known to fit 38 digits, or divide client-side from the exact total
 and the count. The README claim that "only `SUM` and `AVG` need a number" is accurate about *which*
 aggregates need a decode, but only `SUM` has an exact full-range answer in this repo.
+
+## 17. Systematic boundary testing of the chunk arithmetic (`sql/08`)
+
+Two bugs, two different discovery methods, and neither method would have found the other:
+
+| Bug | Class | Found by | Would volume have found it? |
+|---|---|---|---|
+| `FLOOR(t/base)` carry | distribution | 999,934 groups | yes, and only at volume |
+| zero-total → `''` | degenerate input | constructed case | **no** — no group ever summed to 0 |
+
+So `sql/08` enumerates the input space instead of sampling it. **43 groups / 205 rows**, each totalled
+by the chunk SQL and independently by the Python UDAF, with expected values also computed offline in
+Python — a three-way check. Result: **43/43 agreement, 0 mismatches.**
+
+Coverage, chosen from where the boundaries actually are (powers of 10^20, since the chunks are
+base-10^20 — *not* powers of two):
+
+| Class | Cases |
+|---|---|
+| Single boundary values | 0, 1, 2, 9, 10, 10^20±1, 10^40±1, 10^60±1, 2^64±1, 2^128±1, 2^192±1, 2^255, 2^256−2, 2^256−1 |
+| Carry exactly at the base | chunk sum = base−1 (no carry), = base (carry, remainder 0), = base+1 (carry, remainder 1) |
+| Multi-unit carry | seven rows of base−1 → carry of 6 |
+| **Cascading carry** | 10^60−1 has d1=d2=d3=base−1, so two such rows cascade a carry d3→d2→d1→d0 |
+| Interior zero chunks | 10^40+1 (d2=0), 10^60+1 (d1=d2=0) |
+| Widest totals | 100 × (2^256−1) = **80 digits** |
+| Degenerate | total=0, all rows NULL, partially NULL |
+
+The cascading-carry case is the one worth stealing: a single value whose lower three chunks are all
+`base−1` turns one addition into a three-step carry chain, and it is not a case anyone guesses.
+
+### Limits of the math, derived rather than measured
+
+- A chunk holds < 10^20; `decimal(38,0)` holds < 10^38. So chunk sums overflow at roughly **10^18
+  rows**. Not testable directly — stated as arithmetic, not as a measurement.
+- The top chunk is emitted unpadded, so output width is not fixed: at 10^7 rows the widest possible
+  total is ~85 digits and the assembly handles it. Verified to 80 digits.
+- `d0 < 10^18`, not 10^20, because `LPAD` to 80 of a 78-digit number always leaves two leading zeros.
+
+### Harness bug worth recording
+
+Group names contain an uppercase letter (`d3_sum_eq_B`). A `grep -E '[a-z_0-9]+'` over the output
+silently dropped exactly those three rows and looked like missing data — and they were the three
+carry-at-exactly-base cases, i.e. the most important ones. **A verification harness that filters its
+own input can manufacture a false alarm as easily as a false pass.** Same lesson as the `COUNT(*)`
+aggregate-pruning trap in `scripts/bench_scale.sql`.
