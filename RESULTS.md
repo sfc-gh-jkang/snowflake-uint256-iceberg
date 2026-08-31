@@ -532,3 +532,45 @@ do. The pattern to watch for is a limitation asserted from a plausible-sounding 
 no UDF, and returned results byte-identical to the provider run and to the Python oracle — ordering
 agreement 200,000/0, all six percentiles, the 76-digit `AVG`, and the interpolated median. So this
 is a consumer-side capability over a share, not just a provider-side one.
+
+## 20. A non-Snowflake engine reads the chunk columns (`PyIceberg` over Horizon IRC)
+
+Sections 15 and 19 established the chunk columns are Iceberg-native *according to Snowflake*.
+That was reasoning from `GET_DDL` plus the presence of a real `metadata.json`. This section is the
+measurement: an engine that is not Snowflake, authenticated to the Horizon Iceberg REST Catalog,
+reading the same table.
+
+Client: `pyiceberg` `RestCatalog` against
+`https://<org>-<account>.snowflakecomputing.com/polaris/api/catalog`, `warehouse` set to the
+database, `scope` `session:role:ACCOUNTADMIN`. The PAT goes in `credential`, **not** `token` — with
+`token` the client treats it as an already-minted bearer and skips the OAuth exchange.
+
+Schema as the external engine resolved it, with no Snowflake types and no custom extension:
+
+| Column | Iceberg type | Arrow type |
+|---|---|---|
+| `VALUE_RAW` | `fixed[32]` | `fixed_size_binary[32]` |
+| `VALUE_DEC_EXACT` | `string` | `string` |
+| `D0`–`D3` | `decimal(38, 0)` | `decimal128(38, 0)` |
+| `TOKEN_ADDR` | `fixed[20]` | `fixed_size_binary[20]` |
+
+`decimal128(38, 0)` is the ordinary Arrow decimal, so Spark, Trino and DuckDB resolve these the
+same way — nothing here depends on a Snowflake client.
+
+**Full scan: 200,000 rows.** Then the decisive check — reassembling the `uint256` from the four
+base-10^20 chunks *outside Snowflake entirely*, in Python big integers, and comparing it against
+both the raw `fixed(32)` bytes and the exact decimal string:
+
+```python
+B = 10**20
+v = ((int(r["D0"])*B + int(r["D1"]))*B + int(r["D2"]))*B + int(r["D3"])
+assert v == int.from_bytes(r["VALUE_RAW"], "big") == int(r["VALUE_DEC_EXACT"])
+```
+
+**5,000 of 5,000 rows agreed, 0 mismatches**, across all three independent representations.
+
+This is what closes the open-format claim. A consumer who does not use Snowflake at all can take
+the chunk columns, reconstruct the exact 256-bit value, and verify it against the raw bytes — so the
+chunking is a portable encoding, not a Snowflake-only convenience. `fixed[32]` round-trips as
+`fixed_size_binary[32]`, which is why the raw column stays lossless by definition rather than by
+convention.

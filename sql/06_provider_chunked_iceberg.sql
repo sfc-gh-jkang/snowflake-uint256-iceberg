@@ -41,6 +41,34 @@
 --
 -- decimal(38,0) is inside the Iceberg spec's own 38-digit cap, so these are
 -- ordinary Iceberg decimals. Spark and Trino read them with no custom type.
+--
+-- FIXED(32) IS EXACT-LENGTH, AND THE PLATFORM NOW ENFORCES IT
+--
+-- Inserting a value that is not exactly 32 bytes is an error:
+--   100041 (22000): Binary value has length 31, but Iceberg fixed[32] type
+--   requires exactly 32 bytes for column ''
+-- Before release 10.7 (Mar 2026, BCR-2246) Snowflake accepted values SHORTER
+-- than L and left-padded them, which meant a truncated hex string could land
+-- silently. It now fails loudly, so the 32-byte invariant is enforced by the
+-- engine rather than by convention. The decode in sql/01 pads with
+-- LPAD(...,64,'0') to 64 hex characters = 32 bytes, satisfying old and new.
+--   https://docs.snowflake.com/en/user-guide/tables-iceberg-data-types
+--   https://docs.snowflake.com/en/release-notes/bcr-bundles/2026_02/bcr-2246
+--
+-- CHANGE TRACKING IS ALREADY ON, AND CANNOT BE TURNED OFF
+--
+-- Sharing a table that a consumer will build a stream or dynamic table on
+-- normally requires the PROVIDER to enable change tracking first, because
+-- consumers cannot enable it on a shared object:
+--   https://docs.snowflake.com/en/user-guide/dynamic-tables/sharing
+-- For Iceberg tables that step is automatic. Every table below reports
+-- change_tracking = ON with no clause present, and an explicit attempt to
+-- disable it is rejected:
+--   001435 (22023): invalid value 'false' for property 'CHANGE_TRACKING',
+--   Reason: Change Tracking cannot be turned off for Iceberg tables
+-- So no ALTER is needed here, and a consumer-side stream on the shared
+-- APPROVALS_CHUNKED will build. Note this is Iceberg-specific: on a standard
+-- Snowflake table you would still have to set it yourself before sharing.
 
 USE WAREHOUSE <WAREHOUSE>;
 

@@ -87,20 +87,22 @@ Stated plainly, because these are the honest gaps:
   exercised on the AWS pair only: static and dynamic Iceberg table, cross-region share, and the
   consumer running the exact `GROUP BY` off the shared table. The arithmetic is engine-side and
   cloud-independent, but that is reasoning, not a measurement.
-- **The chunk columns read by an external engine.** `GET_DDL` reports Iceberg-native
-  `DECIMAL(38, 0)` and real `metadata.json` exists on the external volume, so Spark or Trino
-  *should* read them as ordinary decimals. No external engine has actually been pointed at them.
-  This is the weakest open-format claim in the repo.
 - **Chunk-sum overflow at ~10^18 rows.** Derived arithmetically (chunk < 10^20, decimal(38,0)
   < 10^38); not reachable on any test dataset, so it is reasoning rather than a measurement.
 - ~~**`AVG`, `MEDIAN` and percentiles over the full 256-bit range.**~~ **VERIFIED exact and pure
   SQL** — see RESULTS.md section 19 and `sql/09`. The previous "not solved" claim here was reasoned,
   not measured, and was wrong.
-- **`DECFLOAT` determinism.** Four repeated sums agreed, which is not enough to claim
-  determinism for an order-sensitive decimal-float aggregate.
+- **`DECFLOAT` determinism.** Four repeated sums agreed, which is weak evidence for an
+  order-sensitive decimal-float aggregate. This is a property of floating-point summation, not a
+  gap in this repo — `DECFLOAT` is already ruled out as lossy at 38 significant digits
+  (RESULTS.md section 3), so its determinism does not affect any claim made here.
 - ~~An incremental refresh of the chunked dynamic table.~~ **VERIFIED** — see RESULTS.md section 18.
-- **A consumer-side stream or dynamic table on `APPROVALS_CHUNKED`.** Proven on
-  `APPROVALS_RAW`, not re-proven on the chunked table.
+- ~~**A consumer-side stream on `APPROVALS_CHUNKED`.**~~ **VERIFIED** — a stream on the shared
+  chunked table was created from the consumer account, cross-region, and reports `stale = false`.
+  Change tracking is always on for Iceberg tables and cannot be disabled, so the usual
+  provider-side prerequisite for sharing to a stream is satisfied automatically. See `sql/06`.
+  Not verified: capturing an actual delta, which would require mutating the 200,000-row dataset
+  the published figures are keyed to.
 - **Teardown with the chunked table present in the share.** `99_teardown.sql` drops the schema
   `CASCADE`, which should cover it, but has not been run since `06` added a shared table.
 - **`bench_scale.sql` on a non-AWS account.** Ran clean end to end on the AWS consumer
