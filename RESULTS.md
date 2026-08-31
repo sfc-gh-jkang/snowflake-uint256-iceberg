@@ -194,3 +194,142 @@ exact match. No `NUMBER` type on any engine can hold this, which is the point: i
 | Secure SQL UDF | yes |
 | Non-secure SQL UDF | no — needs `SECURE` |
 | **Python UDF / UDAF** | **no** — `Python UDFs may not be shared` |
+
+## 12. You cannot `SUM` the exact decimal string
+
+Section 3 established that `DECFLOAT` is not exact. This is the other half: the exact decimal
+string is lossless at rest but is not an aggregation path.
+
+```sql
+SELECT SUM(TO_DECIMAL(value_dec_exact,38,0)) FROM <shared>.APPROVALS_DECODED;
+-- 100038 (22018): Numeric value
+-- '115792089237316195423570985008687907853269984665640564039457584007913129639935'
+-- is not recognized
+```
+
+And the pre-scaled `decimal(38,18)` column is `NULL` on precisely the rows that matter:
+
+| Measure | 200,000-row set |
+|---|---|
+| Rows | 200,000 |
+| `EXCEEDS_NUMBER38` | 10,000 |
+| Pre-scaled column `NULL` | 10,000 |
+| `MAX(LENGTH(value_dec_exact))` | 78 |
+
+So `SUM` on the decimal column **silently skips** the infinite approvals, while `SUM` on the exact
+string **errors outright**. Neither is a usable default, which is what section 13 fixes.
+
+## 13. Exact `uint256` aggregation in pure SQL, including `GROUP BY`
+
+Materialise the value as four base-10^20 chunks of `decimal(38,0)` (`sql/06`). Consumers then
+`SUM` four ordinary numeric columns, and because the base is a power of ten the four subtotals
+reassemble into the exact total **inside SQL** via `MOD` and string concatenation (`sql/07`).
+
+Base-2^64 limbs also work but reassembly then needs big-integer arithmetic outside SQL — fine for
+one grand total, useless for a `GROUP BY`. **The base is chosen for the aggregation, not the decode.**
+
+Headroom: a chunk `SUM` gains one digit per power of ten of row count, so `decimal(38,0)` carries
+roughly 10^18 rows. At 10^7 rows the widest chunk sum observed was 27 digits.
+
+Validated against the Python UDAF (a real big-integer implementation) on 10,000,000 rows:
+
+| Grouping | Groups | Matching | Mismatched | Max digits |
+|---|---|---|---|---|
+| by token | 2,000 | 2,000 | 0 | 81 |
+| high cardinality | 999,934 | 999,934 | 0 | 81 |
+| by token, **off the shared Iceberg table**, cross-region | 12 | 12 | 0 | 81 |
+
+Matched on the largest total *and* on a length checksum across every group, not just on a spot check.
+
+### Performance, XSMALL warehouse, 10,000,000 rows
+
+| Aggregation | 2,000 groups | 1,000,000 groups |
+|---|---|---|
+| **Exact, pure SQL carry** | **304 ms** | **1,171 ms** |
+| Python UDAF (exact, not shareable) | 5,296 ms | 29,202 ms |
+| `DECFLOAT` (approximate) | 1,079 ms | — |
+
+**The gap widens with group count** — 17× at 2,000 groups, 25× at 1,000,000. The pure-SQL path is
+both the exact one and the fast one, which is the opposite of the usual trade-off.
+
+Provider-side decode of all 10,000,000 rows to produce the chunk columns: **13 s on a MEDIUM**, once
+per refresh.
+
+Reproduce with `scripts/bench_scale.sql`. It builds the table, asserts exactness at both group
+counts, prints this table and drops everything including its warehouse. Timings move run to run --
+a second run gave 420 / 5,639 / 1,251 ms for the three methods at 2,000 groups. The ordering and
+the order of magnitude hold; treat the individual numbers as indicative.
+
+At 200,000 rows the ordering is different and misleading — `DECFLOAT` 139 ms vs limb `SUM` 155 ms vs
+UDAF 1,412 ms. Do not size this decision on a small table.
+
+## 14. The `FLOOR(t / base)` carry trap
+
+Found while building section 13, and it is the most dangerous thing in this repository because the
+failure rate is low enough to pass a small test.
+
+Snowflake division returns a **scale-6 result and rounds rather than truncates**
+([arithmetic operators](https://docs.snowflake.com/en/sql-reference/operators-arithmetic)), so
+`FLOOR` of a quotient sitting just under an integer overshoots:
+
+```sql
+SELECT 399999999999999999999999999 / 100000000000000000000;
+-- 4000000.000000        -- rounded up from 3999999.99999999999999999999
+SELECT FLOOR(399999999999999999999999999 / 100000000000000000000);
+-- 4000000               -- WRONG. True floor is 3999999.
+```
+
+The carry lands one too high and the reassembled total is out by exactly 10^20. Correct form:
+
+```sql
+SELECT (399999999999999999999999999 - MOD(399999999999999999999999999,100000000000000000000))
+       / 100000000000000000000;
+-- 3999999               -- exact: the numerator is a whole multiple of the base
+```
+
+| Carry expression | Groups | Mismatched |
+|---|---|---|
+| `FLOOR(t / base)` | 999,934 | **1** |
+| `(t - MOD(t,base)) / base` | 999,934 | 0 |
+
+**One group in 999,934.** The same code passed a 2,000-group test cleanly while it was wrong. If you
+modify the carry arithmetic, validate against a big-integer implementation over at least a million
+groups.
+
+## 15. Iceberg mechanics for the chunk columns
+
+`decimal(38,0)` is inside the Iceberg spec's own 38-digit cap, so the chunks are ordinary Iceberg
+decimals readable by Spark or Trino with no custom type. `GET_DDL` on the created table shows
+Iceberg-native type names:
+
+```
+TX_HASH FIXED(32), VALUE_RAW FIXED(32), VALUE_DEC_EXACT STRING,
+D0 DECIMAL(38, 0), D1 DECIMAL(38, 0), D2 DECIMAL(38, 0), D3 DECIMAL(38, 0)
+```
+
+with real metadata on the provider's own external volume:
+
+```
+s3://<bucket>/eth_u256_approvals_chunked.<suffix>/metadata/00001-....metadata.json
+```
+
+Verified in all four shapes: plain Iceberg table (200,000 rows), **dynamic** Iceberg table
+(200,000 rows), cross-region share (`FIXED(32)` → `BINARY(32)`, `DECIMAL(38,0)` → `NUMBER(38,0)`,
+unchanged), and exact aggregation executed by the consumer off the shared Iceberg table.
+
+Two mechanics that cost time:
+
+**Iceberg DDL wants `FIXED(32)`, not `BINARY(32)`.**
+
+```
+099209 (42601): For Iceberg tables, only max length (67,108,864) is supported for
+'BINARY(L)'. Alternatively, use BINARY directly.
+```
+
+Do not follow that suggestion literally — unqualified `BINARY` gives an unbounded binary, not a
+32-byte fixed. Use `FIXED(32)`. `DESC TABLE` afterwards reports it back as `BINARY(32)`.
+
+**Adding a table to an existing cross-region listing is not immediate.** The consumer returns
+`002003 ... does not exist or not authorized` even though the grant succeeded and
+`SHOW GRANTS TO SHARE` lists the object. That is replication lag, not a broken grant. Trigger
+`SYSTEM$TRIGGER_LISTING_REFRESH('LISTING','<name>')` and it appeared roughly 30 seconds later.

@@ -43,7 +43,8 @@ LISTING_GLOBAL_NAME="${LISTING_GLOBAL_NAME:-}"
 
 mkdir -p "$OUTDIR"
 
-for f in "$REPO_ROOT"/sql/*.sql; do
+for f in "$REPO_ROOT"/sql/*.sql "$REPO_ROOT"/scripts/*.sql; do
+  [[ -e "$f" ]] || continue
   base="$(basename "$f")"
   sed -e "s|<DB>|$DB|g" \
       -e "s|<SCHEMA>|$SCHEMA|g" \

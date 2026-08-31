@@ -81,5 +81,15 @@ Stated plainly, because these are the honest gaps:
   were exercised on the AWS pair only. Azure and GCP ran v3 DDL but no share.
 - **A reader account as consumer.** Reader accounts cannot run DML and are not supported with
   organizational listings; whether they can create a UDF is unverified.
-- **Scale.** 200,000 rows on all three clouds. The 5,000,000-row performance figures in
-  RESULTS.md were measured on the AWS account only.
+- **Scale.** 200,000 rows on all three clouds. The 5,000,000-row and 10,000,000-row performance
+  figures in RESULTS.md were measured on the AWS account only.
+- **`06` and `07` on Azure or GCP.** The chunk columns and the pure-SQL exact aggregation were
+  exercised on the AWS pair only: static and dynamic Iceberg table, cross-region share, and the
+  consumer running the exact `GROUP BY` off the shared table. The arithmetic is engine-side and
+  cloud-independent, but that is reasoning, not a measurement.
+- **The chunk columns read by an external engine.** `GET_DDL` reports Iceberg-native
+  `DECIMAL(38, 0)` and real `metadata.json` exists on the external volume, so Spark or Trino
+  *should* read them as ordinary decimals. No external engine has actually been pointed at them.
+  This is the weakest open-format claim in the repo.
+- **`bench_scale.sql` on a non-AWS account.** Ran clean end to end on the AWS consumer
+  (10,000,000 rows, 0 mismatches at 2,000 and 999,934 groups, self-cleaned). Untested elsewhere.

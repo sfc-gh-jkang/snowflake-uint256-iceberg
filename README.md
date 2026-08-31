@@ -106,13 +106,19 @@ consumer: plain SQL, no UDF. External engines still read the same Parquet.
 This is better than exposing a function anyway: the decode is paid once per refresh rather than
 by every consumer on every query.
 
-## Three consumer paths, all verified cross-region
+## Four consumer paths, all verified cross-region
 
-| Path | What the consumer writes | Setup needed |
-|---|---|---|
-| **1** | `SUM(value_token)` on the shared column | none |
-| **2** | Pure-SQL limb decode on raw `fixed(32)`, or the shared secure SQL UDF | none |
-| **3** | Their own Python UDAF for full 256-bit exact sums | own UDF |
+| Path | What the consumer writes | Setup needed | Exact? |
+|---|---|---|---|
+| **1** | `SUM(value_token)` on the shared pre-scaled column | none | no — `NULL` above 38 digits |
+| **2** | Pure-SQL limb decode on raw `fixed(32)`, or the shared secure SQL UDF | none | to 38 digits |
+| **3** | Their own Python UDAF for full 256-bit exact sums | own UDF | yes, but slow and unshareable |
+| **4** | `SUM` on four base-10^20 chunk columns + in-SQL carry (`sql/07`) | none | **yes, including `GROUP BY`** |
+
+**Path 4 is the recommended default.** It is the only one that is simultaneously exact over the full
+256-bit range, expressible in plain SQL with no UDF, and faster than the alternatives — and the
+performance gap widens as group count rises. Paths 1 and 2 are fine when values are known to fit;
+path 3 remains useful as the reference implementation you validate path 4 against.
 
 Path 3 works because the restriction is on creating objects *inside* the read-only imported
 database, and on *granting* Python to a share — neither blocks a consumer-owned function reading
@@ -126,13 +132,18 @@ Every headline claim, with how it was verified. See [RESULTS.md](RESULTS.md) for
 |---|---|
 | `fixed(32)` holds `uint256` exactly | 32 bytes stored confirmed via `LENGTH()`; hex round-trip byte-identical for 2²⁵⁶−1 |
 | Byte order = numeric order | `ORDER BY` on `BINARY(32)` returned `0 < 1 < 2 < 2^128 < max` |
-| Objects are genuinely Iceberg | `SHOW ICEBERG TABLES` reports both as `MANAGED`, format version 2, on the external volume |
+| Objects are genuinely Iceberg | `SHOW ICEBERG TABLES` reports both as `MANAGED`, format version 3, on the external volume |
 | Decode is exact to 78 digits | `value_dec_exact` max length 78; equals 2²⁵⁶−1 for infinite approvals |
 | Cross-region share preserves fidelity | Consumer `DESC TABLE` shows `BINARY(32)` / `BINARY(20)` after replication |
 | All aggregation paths agree | Four independent methods returned the identical exact wei total |
 | Full 256-bit arithmetic really happens | 82-digit sum, independently recomputed in Python; exact match |
 | Python UDFs cannot be shared | `GRANT USAGE ON FUNCTION … TO SHARE` → `Python UDFs may not be shared` |
 | Cross-region is fully scriptable | `SYSTEM$REQUEST_LISTING_AND_WAIT` then `CREATE DATABASE … FROM LISTING`, no UI |
+| The exact decimal string is **not** summable | `SUM(TO_DECIMAL(value_dec_exact,38,0))` → `100038 Numeric value … is not recognized`; pre-scaled column `NULL` on all 10,000 infinite approvals |
+| Exact `uint256` `GROUP BY` needs no UDF | Base-10^20 chunk `SUM` + in-SQL carry matched the Python UDAF on 999,934 of 999,934 groups at 10M rows |
+| Pure SQL is faster than the UDAF, and pulls ahead | 304 ms vs 5,296 ms at 2,000 groups; 1,171 ms vs 29,202 ms at 1,000,000 |
+| Chunk columns stay open-format | `GET_DDL` shows `DECIMAL(38, 0)`, inside the Iceberg spec's 38-digit cap; real `metadata.json` on the external volume |
+| `FLOOR(t / base)` silently breaks the carry | Snowflake division rounds at scale 6; corrupted 1 group in 999,934, and passed a 2,000-group test while wrong |
 
 ## Gotchas worth knowing before you start
 
@@ -145,8 +156,23 @@ CREATE ICEBERG TABLE … value_raw BINARY(32)
 
 Use `fixed(32)`. `DESC TABLE` then reports it as `BINARY(32)`.
 
-**`TRY_TO_DECIMAL` with a hex format model silently corrupts above 96 bits.** This is the
-sharpest trap here — a `TRY_` function returning a *wrong value* instead of `NULL`:
+**`FLOOR(t / base)` silently breaks base-10 carry arithmetic.** The sharpest trap in this repo
+after `TRY_TO_DECIMAL`, because the failure rate is low enough to pass a small test. Snowflake
+division returns a scale-6 result and **rounds rather than truncates**, so `FLOOR` of a quotient
+sitting just below an integer overshoots by one:
+
+```
+SELECT 399999999999999999999999999 / 100000000000000000000;         → 4000000.000000
+SELECT FLOOR(399999999999999999999999999 / 100000000000000000000);  → 4000000   ✗ (true floor 3999999)
+```
+
+The carry lands one too high and the reassembled total is out by exactly 10^20. Use
+`(t - MOD(t, base)) / base`, which is exact because the numerator is a whole multiple of the base.
+This corrupted **1 group in 999,934** and passed a 2,000-group test while it was wrong — so validate
+any change to `sql/07` against a big-integer implementation over at least a million groups.
+
+**`TRY_TO_DECIMAL` with a hex format model silently corrupts above 96 bits.** A `TRY_` function
+returning a *wrong value* instead of `NULL`:
 
 | input width | result |
 |---|---|
@@ -210,8 +236,11 @@ Then, from `rendered/`:
 | `03` | provider | dynamic Iceberg decode table |
 | `04` | provider | share + private listing. Read `global_name` from `DESCRIBE LISTING` |
 | — | — | put that `global_name` in `.env` as `LISTING_GLOBAL_NAME`, re-run `render.sh` |
-| `05` | consumer | request, import, and the three aggregation paths |
+| `05` | consumer | request, import, and the three original aggregation paths |
+| `06` | provider | base-10^20 chunk columns (static + dynamic Iceberg), grant to share, refresh listing |
+| `07` | consumer | **exact `uint256` aggregation in pure SQL, including `GROUP BY`** + validation vs the UDAF |
 | `99` | both | teardown |
+| `bench_scale.sql` | consumer | **optional**, costs credits. 10M-row exactness + timing table, self-cleaning |
 
 `LISTING_GLOBAL_NAME` is unknown until `04` has run, so the first render warns about it rather
 than failing. That is expected.
@@ -233,10 +262,18 @@ unpublish first, and the listing must go before the share.
 
 - Data is **synthetic**, generated by `01_provider_iceberg_table.sql`. Shapes and magnitudes
   mirror ERC-20 `Approval` events; the values are not real chain data.
-- Benchmarks were measured on the author's own Snowflake demo account on an X-Small–class
-  warehouse, one region pair (`AWS_US_EAST_1` → `AWS_US_WEST_2`), at the row counts stated in
-  RESULTS.md. Treat them as order-of-magnitude, not as a published benchmark.
-- Iceberg format version 2. The consumer-side streams/dynamic-tables path is untested.
+- Benchmarks were measured on the author's own Snowflake demo account, one region pair
+  (`AWS_US_EAST_1` → `AWS_US_WEST_2`). Aggregation figures are X-Small; the 10M-row decode is
+  MEDIUM. Row counts and group counts are stated alongside every number in RESULTS.md. Treat them
+  as order-of-magnitude, not as a published benchmark.
+- Iceberg format version 3, and the consumer-side streams and dynamic-tables path is verified
+  (see the v3 gotcha above).
+- The scale figures in RESULTS.md section 13 come from a 10,000,000-row table that `sql/01` does
+  not generate (it makes 200,000). Reproduce them with `scripts/bench_scale.sql`, which builds the
+  table, proves exactness at both 2,000 and ~1,000,000 groups, prints the timing table and drops
+  everything it created including its MEDIUM warehouse. It costs real credits — read it first.
+  Timings vary run to run: two runs of the same script gave 304/5,296/1,079 ms and
+  420/5,639/1,251 ms. The ordering and the order of magnitude are stable; the exact numbers are not.
 - Cross-Cloud Auto-Fulfillment replicates an external-volume Iceberg table as a
   **Snowflake-managed** Iceberg table in the target region, and the provider is billed for
   egress, storage and compute.
