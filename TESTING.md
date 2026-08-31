@@ -93,8 +93,9 @@ Stated plainly, because these are the honest gaps:
   This is the weakest open-format claim in the repo.
 - **Chunk-sum overflow at ~10^18 rows.** Derived arithmetically (chunk < 10^20, decimal(38,0)
   < 10^38); not reachable on any test dataset, so it is reasoning rather than a measurement.
-- **`AVG`, `MEDIAN` and percentiles over the full 256-bit range.** Not implemented and not
-  measured — see RESULTS.md section 16. Only `SUM` has an exact full-range answer here.
+- ~~**`AVG`, `MEDIAN` and percentiles over the full 256-bit range.**~~ **VERIFIED exact and pure
+  SQL** — see RESULTS.md section 19 and `sql/09`. The previous "not solved" claim here was reasoned,
+  not measured, and was wrong.
 - **`DECFLOAT` determinism.** Four repeated sums agreed, which is not enough to claim
   determinism for an order-sensitive decimal-float aggregate.
 - ~~An incremental refresh of the chunked dynamic table.~~ **VERIFIED** — see RESULTS.md section 18.

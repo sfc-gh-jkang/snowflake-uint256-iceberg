@@ -134,10 +134,11 @@ SELECT COUNT(*) AS groups,
 FROM s JOIN u USING (token_addr);
 
 -- ---------------------------------------------------------------------------
--- NOT SOLVED HERE: AVG, MEDIAN and percentiles over the full 256-bit range.
--- SUM decomposes across chunks; division does not. AVG would need the exact
--- total divided by the count, and an 80-digit dividend is not expressible in
--- decimal(38,0). Options, none implemented: accept DECFLOAT's 38 significant
--- digits, compute AVG only over rows known to fit 38 digits, or do the division
--- client-side from the exact total and the count. MIN and MAX need none of this
--- -- they work directly on the raw fixed(32) bytes (see RESULTS.md section 2).
+-- AVG, MEDIAN and percentiles: see sql/09. An earlier version of this comment
+-- said they were not solvable because "SUM decomposes across chunks, division
+-- does not." That was wrong and untested. Percentiles are an ordering problem,
+-- not an arithmetic one -- ordering by (d0,d1,d2,d3) is ordering by the true
+-- value -- and long division DOES decompose over base-10^20 digits inside
+-- decimal(38,0). Both are exact and pure SQL in sql/09. MIN and MAX need
+-- neither: they work directly on the raw fixed(32) bytes (RESULTS.md §2).
+-- ---------------------------------------------------------------------------

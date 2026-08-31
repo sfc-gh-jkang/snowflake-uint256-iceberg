@@ -124,6 +124,24 @@ Path 3 works because the restriction is on creating objects *inside* the read-on
 database, and on *granting* Python to a share — neither blocks a consumer-owned function reading
 a shared column.
 
+### Which aggregates path 4 covers
+
+All of them, exactly, in plain SQL:
+
+| Aggregate | How | Script |
+|---|---|---|
+| `COUNT` | as normal | — |
+| `MIN` / `MAX` | directly on the raw `fixed(32)` bytes, no decode | — |
+| `SUM` | `SUM` the four chunk columns + in-SQL carry | `sql/07` |
+| `AVG` | carry, then long division over the chunks | `sql/09` |
+| `MEDIAN`, percentiles | nearest-rank on the chunk columns — an ordering problem, no arithmetic | `sql/09` |
+
+Ordering by `(d0,d1,d2,d3)` is ordering by the true numeric value, verified against the raw-byte
+order on all 200,000 rows with zero disagreements, so a percentile just selects an existing row and
+is exact at any magnitude. The one real ergonomic cost: Snowflake's built-in `MEDIAN` /
+`PERCENTILE_CONT` / `PERCENTILE_DISC` take a numeric argument and cannot be pointed at a `uint256`,
+so you write the rank form instead.
+
 ## Claim → evidence matrix
 
 Every headline claim, with how it was verified. See [RESULTS.md](RESULTS.md) for the values.
@@ -142,6 +160,11 @@ Every headline claim, with how it was verified. See [RESULTS.md](RESULTS.md) for
 | The exact decimal string is **not** summable | `SUM(TO_DECIMAL(value_dec_exact,38,0))` → `100038 Numeric value … is not recognized`; pre-scaled column `NULL` on all 10,000 infinite approvals |
 | Exact `uint256` `GROUP BY` needs no UDF | Base-10^20 chunk `SUM` + in-SQL carry matched the Python UDAF on 999,934 of 999,934 groups at 10M rows |
 | Pure SQL is faster than the UDAF, and pulls ahead | 304 ms vs 5,296 ms at 2,000 groups; 1,171 ms vs 29,202 ms at 1,000,000 |
+| Chunk order = true numeric order | `RANK() OVER (ORDER BY value_raw)` vs `RANK() OVER (ORDER BY d0,d1,d2,d3)`: 0 disagreements on 200,000 rows |
+| Exact percentiles need no UDF and no decode | Nearest-rank on the chunks; all six of p01/p25/p50/p75/p90/p99 matched a Python big-integer oracle |
+| Exact `AVG` is pure SQL | Chunk long division returned a 76-digit integer part + 20 decimals, matching the oracle digit for digit |
+| Interpolated (`PERCENTILE_CONT`) median is pure SQL | Two middle rows summed and halved: `2450763588337491807853.5`, matching the oracle |
+| The whole aggregate suite works consumer-side | `sql/09` re-run on the cross-region consumer, X-Small warehouse, no UDF — byte-identical results |
 | Chunk columns stay open-format | `GET_DDL` shows `DECIMAL(38, 0)`, inside the Iceberg spec's 38-digit cap; real `metadata.json` on the external volume |
 | `FLOOR(t / base)` silently breaks the carry | Snowflake division rounds at scale 6; corrupted 1 group in 999,934, and passed a 2,000-group test while wrong |
 

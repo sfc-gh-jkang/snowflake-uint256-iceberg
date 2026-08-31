@@ -359,21 +359,22 @@ distinct value. That is weak evidence: decimal-float addition is order-sensitive
 differ wildly and parallel aggregation order is not guaranteed, so this should not be read as a
 determinism guarantee.
 
-### Not solved by this approach
+### Aggregate coverage
 
 | Aggregate | Status |
 |---|---|
 | `SUM` | exact, pure SQL, per group |
 | `MIN` / `MAX` | exact, works directly on raw `fixed(32)` bytes, no decode |
 | `COUNT` | trivially fine |
-| **`AVG`** | **not solved** — `SUM` decomposes across chunks, division does not |
-| `MEDIAN`, percentiles | not solved, same reason |
+| `AVG` | exact, pure SQL — long division over the chunks (`sql/09`, §19) |
+| `MEDIAN`, percentiles | exact, pure SQL — nearest-rank on the chunks (`sql/09`, §19) |
 
-`AVG` needs the exact total divided by the count, and an 80-digit dividend is not expressible in
-`decimal(38,0)`. Three workarounds, none implemented here: accept `DECFLOAT`'s 38 significant
-digits, restrict `AVG` to rows known to fit 38 digits, or divide client-side from the exact total
-and the count. The README claim that "only `SUM` and `AVG` need a number" is accurate about *which*
-aggregates need a decode, but only `SUM` has an exact full-range answer in this repo.
+An earlier version of this section said `AVG`, `MEDIAN` and percentiles were "not solved, because
+`SUM` decomposes across chunks and division does not." **That was wrong on both counts**, and
+section 19 is the measurement that corrects it. Division decomposes for the same reason the carry
+does, and percentiles are not a division problem at all. The only genuine limitation left is that
+Snowflake's *built-in* `MEDIAN` / `PERCENTILE_CONT` / `PERCENTILE_DISC` cannot be used, since they
+take a numeric argument; the rank-based form replaces them.
 
 ## 17. Systematic boundary testing of the chunk arithmetic (`sql/08`)
 
@@ -457,3 +458,77 @@ the independently Python-computed total, to the digit:
 So the chunk pipeline is correct on **newly arrived** data, not just on the seeded set — including
 a zero row and a chunk-boundary row flowing through a dynamic table rather than being constructed
 in a test harness. Test rows were then deleted and all three tables verified back to 200,000.
+
+## 19. `AVG`, `MEDIAN` and percentiles are solvable — correcting section 16
+
+Section 16 previously asserted that `AVG`, `MEDIAN` and percentiles had no exact full-range answer,
+on the reasoning that "`SUM` decomposes across chunks, division does not." That reasoning was
+wrong, and it had gone into the repo untested. Both halves fail:
+
+**Percentiles are an ordering problem, not an arithmetic one.** The chunk columns are big-endian
+positional digits, so ordering by `(d0,d1,d2,d3)` is ordering by the true numeric value. It is also
+the same order as the raw `fixed(32)` bytes, which is why `MIN`/`MAX` already worked. Measured on
+all 200,000 rows, `RANK() OVER (ORDER BY value_raw)` against `RANK() OVER (ORDER BY d0,d1,d2,d3)`:
+
+| rows | disagreements |
+|---|---|
+| 200,000 | **0** |
+
+So a nearest-rank percentile *selects an existing row* and is exact by construction at any
+magnitude — no decode, no arithmetic, nothing to overflow. All six percentiles matched a Python
+oracle that sorted the same 200,000 values as arbitrary-precision integers:
+
+| percentile | exact value | matches oracle |
+|---|---|---|
+| p01 | `1060471475322006490` | yes |
+| p25 | `1200196815317056299170` | yes |
+| p50 (discrete median) | `2450760894337332050594` | yes |
+| p75 | `3714662421579011409161` | yes |
+| p90 | `4466169955435932327751` | yes |
+| p99 | `115792089237316195423570985008687907853269984665640564039457584007913129639935` | yes |
+
+`p99` is a useful sanity check rather than a coincidence: the 10,000 infinite approvals are exactly
+5% of 200,000 rows, so the top 5% *should* all be 2^256−1.
+
+**Division decomposes too.** Long division over base-10^20 digits keeps every intermediate inside
+`decimal(38,0)`, because the running remainder is strictly less than `n`, so `remainder * 10^20 <
+n * 10^20`, which fits whenever `n <= 10^18` — the *same* row-count bound the chunk sums already
+carry. So `AVG` costs no new limit. Exact `AVG` over the full table, against the Python oracle:
+
+```
+5789604461865809771178549250434395392663499233282028204186687933974457107495.68993500000000000000
+```
+
+76-digit integer part, 20 fractional digits, matching digit for digit. Chain one more step off the
+final remainder for 20 more decimal places.
+
+**Interpolated median works as a composition of the two.** `PERCENTILE_CONT` for even `n` is the
+mean of the two middle rows, which is the sql/07 carry followed by the division above over a
+two-row group. Verified rather than assumed:
+
+```
+2450763588337491807853.50000000000000000000
+```
+
+matching the oracle's `2450763588337491807853.5`.
+
+**Same trap, same fix.** The division uses `(x - MOD(x,d))/d`, never `FLOOR(x/d)` — Snowflake
+division returns a scale-6 *rounded* result, so `FLOOR` is silently off by one on a fraction of
+inputs. This is the identical defect found in the carry at 10M-row scale (§16), and it applies to
+the division for exactly the same reason. Anyone reimplementing the division will hit it.
+
+**What is actually still limited.** Snowflake's built-in `MEDIAN`, `PERCENTILE_CONT` and
+`PERCENTILE_DISC` take a numeric argument and so cannot be pointed at a `uint256`; the rank-based
+form replaces them. That is an ergonomics cost, not a capability gap. Everything here inherits the
+existing `n <= 10^18` bound and adds nothing new.
+
+**Method note.** This is the second time a claim in this repo was reasoned rather than measured and
+turned out to be wrong in the *optimistic-sounding* direction of understating what the approach can
+do. The pattern to watch for is a limitation asserted from a plausible-sounding mechanism
+("division doesn't decompose") without a query behind it. See `sql/09`.
+
+**Where this ran.** All four sections were then run again by the **consumer** on `HOB89740`
+(`AWS_US_WEST_2`) against the cross-region shared `APPROVALS_CHUNKED`, on an X-Small warehouse with
+no UDF, and returned results byte-identical to the provider run and to the Python oracle — ordering
+agreement 200,000/0, all six percentiles, the 76-digit `AVG`, and the interpolated median. So this
+is a consumer-side capability over a share, not just a provider-side one.
