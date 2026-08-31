@@ -91,5 +91,15 @@ Stated plainly, because these are the honest gaps:
   `DECIMAL(38, 0)` and real `metadata.json` exists on the external volume, so Spark or Trino
   *should* read them as ordinary decimals. No external engine has actually been pointed at them.
   This is the weakest open-format claim in the repo.
+- **`AVG`, `MEDIAN` and percentiles over the full 256-bit range.** Not implemented and not
+  measured — see RESULTS.md section 16. Only `SUM` has an exact full-range answer here.
+- **`DECFLOAT` determinism.** Four repeated sums agreed, which is not enough to claim
+  determinism for an order-sensitive decimal-float aggregate.
+- **An incremental refresh of the chunked dynamic table.** Only the initial build was
+  exercised; no rows were appended and no refresh observed picking them up.
+- **A consumer-side stream or dynamic table on `APPROVALS_CHUNKED`.** Proven on
+  `APPROVALS_RAW`, not re-proven on the chunked table.
+- **Teardown with the chunked table present in the share.** `99_teardown.sql` drops the schema
+  `CASCADE`, which should cover it, but has not been run since `06` added a shared table.
 - **`bench_scale.sql` on a non-AWS account.** Ran clean end to end on the AWS consumer
   (10,000,000 rows, 0 mismatches at 2,000 and 999,934 groups, self-cleaned). Untested elsewhere.

@@ -35,6 +35,12 @@
 --          / 100000000000000000000;
 --   -> 3999999                             -- correct
 --
+-- DEGENERATE GROUPS. LTRIM(...,'0') on an all-zero string returns the EMPTY STRING,
+-- not '0', and an all-NULL group returns NULL. The UDAF returns '0' for both, so
+-- either case shows up as a spurious mismatch. Hence COALESCE(NULLIF(...,''),'0').
+-- No group in the 200k or 10M sets summed to zero, so this never surfaced in the
+-- headline validation -- it was found by constructing the case deliberately.
+--
 -- FAILURE RATE, AND WHY THAT MATTERS FOR HOW YOU TEST THIS.
 -- The FLOOR version corrupted 1 group in 999,934. A 2,000-group test passed
 -- clean while the code was wrong. If you modify this, validate against a
@@ -61,11 +67,11 @@ c3 AS (SELECT t0, r3, r2,
               MOD(t1 + k2, 100000000000000000000) AS r1,
               ((t1 + k2) - MOD(t1 + k2, 100000000000000000000)) / 100000000000000000000 AS k1
        FROM c2)
-SELECT LTRIM(
+SELECT COALESCE(NULLIF(LTRIM(
          TO_VARCHAR(FLOOR(t0 + k1))
          || LPAD(TO_VARCHAR(FLOOR(r1)),20,'0')
          || LPAD(TO_VARCHAR(FLOOR(r2)),20,'0')
-         || LPAD(TO_VARCHAR(FLOOR(r3)),20,'0'), '0') AS exact_total_wei
+         || LPAD(TO_VARCHAR(FLOOR(r3)),20,'0'), '0'),''),'0') AS exact_total_wei
 FROM c3;
 -- The FLOOR() calls here are cosmetic only: MOD and the exact division above
 -- yield whole numbers, but Snowflake carries a scale on them, so FLOOR strips
@@ -95,10 +101,10 @@ c3 AS (SELECT token_addr, n, t0, r3, r2,
               ((t1 + k2) - MOD(t1 + k2, 100000000000000000000)) / 100000000000000000000 AS k1
        FROM c2)
 SELECT token_addr, n,
-       LTRIM(TO_VARCHAR(FLOOR(t0 + k1))
+       COALESCE(NULLIF(LTRIM(TO_VARCHAR(FLOOR(t0 + k1))
              || LPAD(TO_VARCHAR(FLOOR(r1)),20,'0')
              || LPAD(TO_VARCHAR(FLOOR(r2)),20,'0')
-             || LPAD(TO_VARCHAR(FLOOR(r3)),20,'0'), '0') AS exact_total_wei
+             || LPAD(TO_VARCHAR(FLOOR(r3)),20,'0'), '0'),''),'0') AS exact_total_wei
 FROM c3;
 
 SELECT * FROM <CONSUMER_SCHEMA>.V_EXACT_BY_TOKEN ORDER BY n DESC LIMIT 10;
@@ -126,3 +132,12 @@ SELECT COUNT(*) AS groups,
        COUNT_IF(s.exact_total_wei <> u.exact_udaf) AS mismatched,
        MAX(LENGTH(u.exact_udaf))                   AS max_digits
 FROM s JOIN u USING (token_addr);
+
+-- ---------------------------------------------------------------------------
+-- NOT SOLVED HERE: AVG, MEDIAN and percentiles over the full 256-bit range.
+-- SUM decomposes across chunks; division does not. AVG would need the exact
+-- total divided by the count, and an 80-digit dividend is not expressible in
+-- decimal(38,0). Options, none implemented: accept DECFLOAT's 38 significant
+-- digits, compute AVG only over rows known to fit 38 digits, or do the division
+-- client-side from the exact total and the count. MIN and MAX need none of this
+-- -- they work directly on the raw fixed(32) bytes (see RESULTS.md section 2).

@@ -333,3 +333,44 @@ Do not follow that suggestion literally — unqualified `BINARY` gives an unboun
 `002003 ... does not exist or not authorized` even though the grant succeeded and
 `SHOW GRANTS TO SHARE` lists the object. That is replication lag, not a broken grant. Trigger
 `SYSTEM$TRIGGER_LISTING_REFRESH('LISTING','<name>')` and it appeared roughly 30 seconds later.
+
+## 16. Degenerate groups, and what the chunk path does *not* solve
+
+Found by deliberately constructing the cases, not by the headline validation — no group in either
+the 200,000-row or 10,000,000-row set summed to zero, so a million-group run would not have caught
+this either.
+
+`LTRIM(<all zeros>, '0')` returns the **empty string**, not `'0'`, and an all-NULL group returns
+`NULL`. The UDAF returns `'0'` for both, so either case reports as a spurious mismatch:
+
+| Group | Before fix | After fix | UDAF |
+|---|---|---|---|
+| total = 0 | `''` | `'0'` | `'0'` |
+| all values NULL | `NULL` | `'0'` | `'0'` |
+| total = 1 | `'1'` | `'1'` | `'1'` |
+
+Fix is `COALESCE(NULLIF(LTRIM(...,'0'),''),'0')`. Applied in `sql/07` and `scripts/bench_scale.sql`.
+
+**NULL handling is otherwise consistent.** `SUM` skips NULL chunks and the UDAF skips `None`, so a
+partially-NULL group agrees between the two without special handling.
+
+**`DECFLOAT` was stable across the runs tested** — four repeated full-table sums returned one
+distinct value. That is weak evidence: decimal-float addition is order-sensitive when magnitudes
+differ wildly and parallel aggregation order is not guaranteed, so this should not be read as a
+determinism guarantee.
+
+### Not solved by this approach
+
+| Aggregate | Status |
+|---|---|
+| `SUM` | exact, pure SQL, per group |
+| `MIN` / `MAX` | exact, works directly on raw `fixed(32)` bytes, no decode |
+| `COUNT` | trivially fine |
+| **`AVG`** | **not solved** — `SUM` decomposes across chunks, division does not |
+| `MEDIAN`, percentiles | not solved, same reason |
+
+`AVG` needs the exact total divided by the count, and an 80-digit dividend is not expressible in
+`decimal(38,0)`. Three workarounds, none implemented here: accept `DECFLOAT`'s 38 significant
+digits, restrict `AVG` to rows known to fit 38 digits, or divide client-side from the exact total
+and the count. The README claim that "only `SUM` and `AVG` need a number" is accurate about *which*
+aggregates need a decode, but only `SUM` has an exact full-range answer in this repo.
