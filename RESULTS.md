@@ -419,3 +419,41 @@ silently dropped exactly those three rows and looked like missing data — and t
 carry-at-exactly-base cases, i.e. the most important ones. **A verification harness that filters its
 own input can manufacture a false alarm as easily as a false pass.** Same lesson as the `COUNT(*)`
 aggregate-pruning trap in `scripts/bench_scale.sql`.
+
+## 18. Incremental refresh through the two-level dynamic-table chain
+
+`APPROVALS_RAW` (Iceberg) → `APPROVALS_DECODED` (dynamic, decode) → `APPROVALS_CHUNKED_DT`
+(dynamic, chunk columns). Appending to the base table and refreshing both levels was verified to
+propagate correctly, and — more importantly — the chunk values were checked against the known
+inputs rather than only the row counts.
+
+Three rows appended, chosen to exercise the boundaries rather than to be representative:
+
+| `log_index` | value | why this value |
+|---|---|---|
+| 7001 | 2^256−1 | maximum, 78 digits |
+| 7002 | **0** | degenerate zero (the case section 16 fixed) |
+| 7003 | **10^20** | lands exactly on a chunk boundary |
+
+Both levels went 200,000 → 200,003 incrementally, and the materialised chunks were exact:
+
+```
+7001  d0=115792089237316195  d1=42357098500868790785  d2=32699846656405640394  d3=57584007913129639935
+7002  d0=0                   d1=0                     d2=0                     d3=0
+7003  d0=0                   d1=0                     d2=1                     d3=0
+```
+
+`7003` is the informative one: 10^20 correctly becomes `d2=1, d3=0` — one whole unit of the base
+with a zero remainder. And `7001` confirms the derived bound that **`d0 < 10^18`**, not 10^20,
+because `LPAD` to 80 of a 78-digit value always leaves two leading zeros (`d0` is 18 digits).
+
+The exact aggregation then ran over the refreshed dynamic table for that token group and returned
+the independently Python-computed total, to the digit:
+
+```
+115792089237316195423570985008687907853269984665640564039557584007913129639935   (78 digits)
+```
+
+So the chunk pipeline is correct on **newly arrived** data, not just on the seeded set — including
+a zero row and a chunk-boundary row flowing through a dynamic table rather than being constructed
+in a test harness. Test rows were then deleted and all three tables verified back to 200,000.

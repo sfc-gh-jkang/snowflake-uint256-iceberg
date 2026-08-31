@@ -97,10 +97,7 @@ Stated plainly, because these are the honest gaps:
   measured — see RESULTS.md section 16. Only `SUM` has an exact full-range answer here.
 - **`DECFLOAT` determinism.** Four repeated sums agreed, which is not enough to claim
   determinism for an order-sensitive decimal-float aggregate.
-- **An incremental refresh of the chunked dynamic table.** ATTEMPTED and INCOMPLETE. Rows were
-  appended to `APPROVALS_RAW` and a refresh of both dynamic tables was issued, but the provider
-  connection became unreachable mid-test, so neither the row counts nor the chunk values were
-  ever verified. Treat this as untested, and see the note below about residual state.
+- ~~An incremental refresh of the chunked dynamic table.~~ **VERIFIED** — see RESULTS.md section 18.
 - **A consumer-side stream or dynamic table on `APPROVALS_CHUNKED`.** Proven on
   `APPROVALS_RAW`, not re-proven on the chunked table.
 - **Teardown with the chunked table present in the share.** `99_teardown.sql` drops the schema
