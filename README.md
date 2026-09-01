@@ -124,6 +124,41 @@ Path 3 works because the restriction is on creating objects *inside* the read-on
 database, and on *granting* Python to a share — neither blocks a consumer-owned function reading
 a shared column.
 
+### What the chunks are — and what they are not
+
+The chunks do **not** replace the `uint256`, and nothing is divided or rounded. Each row of the
+chunked table carries the same value three ways:
+
+| Column | Type | What it is |
+|---|---|---|
+| `value_raw` | `fixed(32)` | the actual 32 bytes off the chain — source of truth, lossless by definition |
+| `value_dec_exact` | `string` | the same value, human-readable, exact to the last digit |
+| `d0`–`d3` | `decimal(38,0)` | the same value again, as four 20-digit positional windows |
+
+If every chunk column were deleted tomorrow, no information is gone.
+
+The chunking is **place value, not division**. Left-pad the decimal to 80 characters, cut it into
+four 20-digit windows, and
+
+```
+value = d0 × 10^60 + d1 × 10^40 + d2 × 10^20 + d3
+```
+
+exactly like writing 1,234,567 as columns of millions / thousands / units. Reassembly is exact and
+was measured outside Snowflake: rebuilding the value from the four chunks in Python big integers
+matched both the raw bytes and the exact decimal string on 5,000 of 5,000 rows
+([RESULTS.md](RESULTS.md) section 20).
+
+The chunking is **forced, not chosen**. `SUM()` needs a numeric column, and no numeric type in the
+Iceberg ecosystem holds 78 digits — the Iceberg spec caps `decimal(P,S)` at `P=38`, the same ceiling
+as Snowflake `NUMBER`. That is a *table-format* limit, so Spark and Trino hit the identical wall. You
+cannot `SUM` a `fixed(32)` and you cannot `SUM` a string.
+
+So the right way to read `d0`–`d3` is as a **derived index for aggregation**, the way you would add a
+search-optimized column: keep the raw bytes as the record, and carry four cheap derived columns so
+consumers can `GROUP BY` without a UDF. The cost is storage — 20.8 MB against 10.1 MB for raw at
+200,000 rows, because the value is stored three times.
+
 ### Which aggregates path 4 covers
 
 All of them, exactly, in plain SQL:
